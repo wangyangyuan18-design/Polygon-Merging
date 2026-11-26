@@ -1,0 +1,13 @@
+[general]
+name=Polygon Merging
+qgisMinimumVersion=3.28
+qgisMaximumVersion=3.99
+description=Merge polygon features by selection, whole layer, or name substring; automatically connect disconnected components using the shortest vertex pair.
+version=0.1.0
+author=wangyangyuan18-design
+email=
+about=Combines polygon features and automatically connects disconnected polygon parts using the shortest exterior-vertex connection and a minimal geometry tolerance.
+category=Vector
+icon=
+experimental=False
+deprecated=False
