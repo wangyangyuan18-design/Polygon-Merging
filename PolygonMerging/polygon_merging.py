@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from qgis.PyQt.QtWidgets import QAction, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QRadioButton, QButtonGroup, QLineEdit, QPushButton, QMessageBox, QProgressBar, QCheckBox
-from qgis.core import QgsProject, QgsWkbTypes, QgsVectorLayer, QgsFeature, QgsField, QgsGeometry, QgsPointXY, QgsCoordinateReferenceSystem, QgsCoordinateTransform
+from qgis.core import QgsProject, QgsWkbTypes, QgsVectorLayer, QgsFeature, QgsField, QgsGeometry, QgsPointXY, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFillSymbol, QgsSingleSymbolRenderer
 from qgis.PyQt.QtCore import QVariant
 import math
 
@@ -129,6 +129,8 @@ class MergeDialog(QDialog):
             out = QgsVectorLayer("MultiPolygon?crs=" + layer.crs().authid(), layer.name() + "_Connected_Polygon_5m", "memory")
             if not out.isValid():
                 raise Exception("无法创建输出图层。")
+            symbol = QgsFillSymbol.createSimple({"color": "255,85,20,255", "outline_color": "255,0,0,255", "outline_width": "0.6"})
+            out.setRenderer(QgsSingleSymbolRenderer(symbol))
             provider = out.dataProvider()
             provider.addAttributes([
                 QgsField("Group_Name", QVariant.String, len=254),
