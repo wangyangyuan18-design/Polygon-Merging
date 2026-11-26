@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from qgis.PyQt.QtWidgets import QAction, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QRadioButton, QButtonGroup, QLineEdit, QPushButton, QMessageBox, QProgressBar, QCheckBox
-from qgis.core import QgsProject, QgsWkbTypes, QgsVectorLayer, QgsFeature, QgsField, QgsGeometry, QgsPointXY
+from qgis.core import QgsProject, QgsWkbTypes, QgsVectorLayer, QgsFeature, QgsField, QgsGeometry, QgsPointXY, QgsCoordinateReferenceSystem, QgsCoordinateTransform
 from qgis.PyQt.QtCore import QVariant
 import math
 
@@ -36,7 +36,7 @@ class MergeDialog(QDialog):
         super().__init__(iface.mainWindow())
         self.iface = iface
         self.layers = layers
-        self.setWindowTitle("Polygon Merging - 外轮廓连接")
+        self.setWindowTitle("Polygon Merging - 5米宽连接面")
         self.setMinimumWidth(480)
         root = QVBoxLayout(self)
         root.addWidget(QLabel("输入多边形图层"))
@@ -61,7 +61,7 @@ class MergeDialog(QDialog):
         self.name_edit.setPlaceholderText("例如：KIM-HB")
         row.addWidget(self.name_edit)
         root.addLayout(row)
-        note = QLabel("输出为纯外轮廓线：不填充多边形。分离区域之间直接连接最近的两个外环顶点（单条直线），不生成缓冲区、圆弧或内部边线。")
+        note = QLabel("输出为橙色填充多边形。分离区域之间连接最近的两个外环顶点，并生成总宽度5米的连接带（两侧各2.5米），再与原多边形融合。清除内部共享边界和内部孔洞。")
         note.setWordWrap(True)
         root.addWidget(note)
 
@@ -126,7 +126,7 @@ class MergeDialog(QDialog):
         self.run_btn.setEnabled(False)
         self.progress.setValue(0)
         try:
-            out = QgsVectorLayer("MultiLineString?crs=" + layer.crs().authid(), layer.name() + "_Outer_Outline_Line", "memory")
+            out = QgsVectorLayer("MultiPolygon?crs=" + layer.crs().authid(), layer.name() + "_Connected_Polygon_5m", "memory")
             if not out.isValid():
                 raise Exception("无法创建输出图层。")
             provider = out.dataProvider()
@@ -152,7 +152,7 @@ class MergeDialog(QDialog):
                         ids.append(str(feat.id()))
                 if geoms:
                     try:
-                        merged, connects = merge_and_connect(geoms)
+                        merged, connects = merge_and_connect(geoms, layer)
                         f = QgsFeature(out.fields())
                         f.setGeometry(merged)
                         f.setAttributes([str(group_name)[:254], len(ids), ",".join(ids)[:10000], connects])
@@ -167,7 +167,7 @@ class MergeDialog(QDialog):
                 raise Exception("没有生成任何结果。\n" + "\n".join(failures[:10]))
             QgsProject.instance().addMapLayer(out)
             self.iface.setActiveLayer(out)
-            message = "处理完成。\n输出外轮廓线数量：" + str(out.featureCount())
+            message = "处理完成。\n输出连接后多边形数量：" + str(out.featureCount())
             if failures:
                 message += "\n失败/跳过：" + str(len(failures)) + "\n" + "\n".join(failures[:8])
             QMessageBox.information(self, "Polygon Merging", message)
@@ -219,33 +219,78 @@ def closest_vertex_pair(a, b):
     return best[0], best[1], math.sqrt(best_d2)
 
 
-def merge_and_connect(geometries):
+
+def metric_transform_for_layer(layer):
+    """Create a local UTM transform so connector width is measured in metres."""
+    project = QgsProject.instance()
+    source_crs = layer.crs()
+    if not source_crs.isValid():
+        raise Exception("输入图层没有有效坐标系，无法保证连接宽度为5米。")
+    to_wgs84 = QgsCoordinateTransform(
+        source_crs, QgsCoordinateReferenceSystem("EPSG:4326"),
+        project.transformContext()
+    )
+    extent = layer.extent()
+    center = QgsPointXY((extent.xMinimum() + extent.xMaximum()) / 2.0,
+                        (extent.yMinimum() + extent.yMaximum()) / 2.0)
+    try:
+        center.transform(to_wgs84)
+    except Exception as exc:
+        raise Exception("无法计算图层所在位置的UTM投影：" + str(exc))
+    zone = max(1, min(60, int((center.x() + 180.0) / 6.0) + 1))
+    epsg = (32600 if center.y() >= 0 else 32700) + zone
+    metric_crs = QgsCoordinateReferenceSystem("EPSG:" + str(epsg))
+    if not metric_crs.isValid():
+        raise Exception("无法创建米制UTM坐标系 EPSG:" + str(epsg))
+    forward = QgsCoordinateTransform(source_crs, metric_crs, project.transformContext())
+    backward = QgsCoordinateTransform(metric_crs, source_crs, project.transformContext())
+    return forward, backward, epsg
+
+
+def fill_polygon_holes(geom):
+    """Remove interior rings and retain polygon exterior areas."""
+    exteriors = []
+    for part in polygon_parts(geom):
+        ring = exterior_vertices(part)
+        if len(ring) >= 3:
+            ring.append(ring[0])
+            exteriors.append(QgsGeometry.fromPolygonXY([ring]))
+    if not exteriors:
+        raise Exception("无法提取融合后的多边形外轮廓")
+    result = QgsGeometry.unaryUnion(exteriors)
+    if result.isNull() or result.isEmpty():
+        raise Exception("填除内部孔洞时生成几何失败")
+    if not result.isGeosValid():
+        result = result.makeValid()
+    return result
+
+
+def merge_and_connect(geometries, layer):
     """
-    Dissolve source polygons, extract only exterior rings, then connect
-    disconnected polygon components with straight vertex-to-vertex lines.
-    No buffer, corridor, rounded cap, or synthetic intermediate vertex.
+    Dissolve polygons in a local metric CRS. Connect disconnected components
+    using the nearest exterior vertices and a 2.5 m buffer radius, producing
+    a 5 m total-width filled bridge. Return a polygon in the source CRS.
     """
-    merged = QgsGeometry.unaryUnion(geometries)
+    forward, backward, epsg = metric_transform_for_layer(layer)
+    metric_geoms = []
+    for source_geom in geometries:
+        geom = QgsGeometry(source_geom)
+        transform_result = geom.transform(forward)
+        if transform_result != 0:
+            raise Exception("转换到米制坐标系失败（EPSG:" + str(epsg) + "）")
+        if not geom.isNull() and not geom.isEmpty():
+            metric_geoms.append(geom)
+
+    merged = QgsGeometry.unaryUnion(metric_geoms)
     if merged.isNull() or merged.isEmpty():
         raise Exception("几何融合失败")
     if not merged.isGeosValid():
         merged = merged.makeValid()
-
     parts = polygon_parts(merged)
     if not parts:
-        raise Exception("没有可用的多边形外环")
+        raise Exception("没有可用的多边形区域")
 
-    # Extract only exterior rings after dissolving overlaps/touching polygons.
-    line_geometries = []
-    for part in parts:
-        ring = exterior_vertices(part)
-        if len(ring) < 3:
-            continue
-        ring.append(ring[0])
-        line_geometries.append(QgsGeometry.fromPolylineXY(ring))
-
-    # Kruskal minimum spanning tree: connect every disconnected component
-    # with exactly one straight segment between the nearest exterior vertices.
+    # Minimum spanning tree: each edge connects the closest vertex pair.
     count = len(parts)
     parent = list(range(count))
 
@@ -262,26 +307,39 @@ def merge_and_connect(geometries):
             candidates.append((dist, i, j, p, q))
     candidates.sort(key=lambda item: item[0])
 
+    bridges = []
     connects = 0
     for dist, i, j, p, q in candidates:
-        ri, rj = find(i), find(j)
-        if ri == rj:
+        root_i, root_j = find(i), find(j)
+        if root_i == root_j:
             continue
-        parent[ri] = rj
-        line_geometries.append(QgsGeometry.fromPolylineXY([p, q]))
+        parent[root_i] = root_j
+        connector = QgsGeometry.fromPolylineXY([p, q])
+        # 2.5 m on either side of the centerline = 5 m total width.
+        bridge = connector.buffer(2.5, 1)
+        if bridge.isNull() or bridge.isEmpty():
+            raise Exception("创建5米宽连接带失败")
+        bridges.append(bridge)
         connects += 1
         if connects == count - 1:
             break
 
     if count > 1 and connects != count - 1:
-        raise Exception("未能将所有分离区域连接起来")
+        raise Exception("未能连接所有分离区域")
 
-    # Union linework only; no buffer and no polygon fill.
-    result = QgsGeometry.unaryUnion(line_geometries)
+    result = QgsGeometry.unaryUnion([merged] + bridges)
     if result.isNull() or result.isEmpty():
-        raise Exception("生成外轮廓线失败")
-    if QgsWkbTypes.geometryType(result.wkbType()) != QgsWkbTypes.LineGeometry:
-        raise Exception("最终结果不是线几何")
+        raise Exception("融合连接带失败")
+    if not result.isGeosValid():
+        result = result.makeValid()
+    result = fill_polygon_holes(result)
+
+    if len(polygon_parts(result)) != 1:
+        raise Exception("连接后仍有多个独立多边形；为避免输出不完整结果，本组已跳过。")
+
+    transform_result = result.transform(backward)
+    if transform_result != 0:
+        raise Exception("将结果转换回原图层坐标系失败")
     if not result.isMultipart():
         result.convertToMultiType()
     return result, connects
