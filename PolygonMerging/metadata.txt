@@ -2,11 +2,11 @@
 name=Polygon Merging
 qgisMinimumVersion=3.28
 qgisMaximumVersion=3.99
-description=Merge polygon features by selection, whole layer, or name substring; automatically connect disconnected components using the shortest vertex pair.
-version=0.1.0
+description=Create pure exterior outline lines by dissolving polygons and connecting disconnected components with straight nearest-vertex segments.
+version=0.3.0
 author=wangyangyuan18-design
 email=
-about=Combines polygon features and automatically connects disconnected polygon parts using the shortest exterior-vertex connection and a minimal geometry tolerance.
+about=Outputs exterior boundary linework only. Disconnected polygon components are joined by straight two-vertex connector lines; no buffer, rounded bridge, or polygon fill.
 category=Vector
 icon=
 experimental=False
