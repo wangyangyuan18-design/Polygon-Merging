@@ -1,33 +1,25 @@
 # Polygon Merging (QGIS Plugin)
 
-QGIS plugin that creates clean exterior outline linework from polygon features.
+QGIS plugin for dissolving polygon features and connecting disconnected components into filled polygon outputs.
 
 ## Features
 
-- Process selected polygon features.
-- Process all polygon features in a layer.
-- Group features by a text field value containing a manually entered substring. Each distinct matching field value becomes one output feature.
+- Process selected polygon features, an entire layer, or groups selected by a name substring.
 - Dissolve overlapping/touching polygons and remove internal shared boundaries.
-- Extract exterior rings only; interior holes are omitted.
-- Connect disconnected components by finding the nearest pair of exterior-ring vertices and adding one straight two-vertex line segment.
-- No buffer, corridor width, rounded caps, or synthetic arc vertices are generated.
-- Original input layer is never edited or deleted.
-
-## Output
-
-The result is a temporary **MultiLineString** memory layer, not a filled polygon. Each output feature contains the exterior boundary linework and straight connector segments for its group. Use the layer's line symbology to display the outline; no polygon fill is involved.
+- For disconnected components, find the nearest pair of exterior-ring vertices.
+- Connect each pair with a bridge of **5 metres total width** (2.5 m buffer radius on each side of the straight connector).
+- Bridge distances are calculated in a local UTM CRS, then results are transformed back to the source layer CRS. This also supports source layers stored in geographic coordinates.
+- Remove interior holes from the final filled geometry.
+- Output is a temporary **MultiPolygon** memory layer; original input data is not modified.
 
 ## Install
 
-1. Download the ZIP package from the latest successful GitHub Actions run or Releases.
-2. In QGIS open Plugins > Manage and Install Plugins > Install from ZIP.
-3. Select the downloaded ZIP and enable Polygon Merging.
-4. Open it from the Plugins menu or toolbar.
+In QGIS, open Plugins > Manage and Install Plugins > Install from ZIP, then select the plugin ZIP.
 
 ## Name grouping
 
-The name mode uses the Name field when present; otherwise it uses the first text field. Features whose field value contains the entered substring are grouped by their complete field value. Each distinct matching value produces one output feature.
+The name mode uses the Name field when present; otherwise it uses the first text field. Matching features are grouped by their complete field value. Each distinct matching value produces one output feature.
 
-## Compatibility
+## Output styling
 
-Designed for QGIS 3.28+; target environment is QGIS 3.40.x. Output is a temporary memory layer; right-click it and choose Make Permanent to save it.
+The output is a filled polygon layer. Apply a fill color such as orange and a red outline in Layer Styling to reproduce the intended appearance. Right-click the temporary layer and choose Make Permanent to save it.
