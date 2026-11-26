@@ -3,6 +3,7 @@ from qgis.PyQt.QtWidgets import QAction, QDialog, QVBoxLayout, QHBoxLayout, QLab
 from qgis.core import QgsProject, QgsWkbTypes, QgsVectorLayer, QgsFeature, QgsField, QgsGeometry, QgsPointXY
 from qgis.PyQt.QtCore import QVariant
 import math
+import statistics
 
 
 class PolygonMergingPlugin:
@@ -36,8 +37,8 @@ class MergeDialog(QDialog):
         super().__init__(iface.mainWindow())
         self.iface = iface
         self.layers = layers
-        self.setWindowTitle("Polygon Merging - 多边形合并")
-        self.setMinimumWidth(460)
+        self.setWindowTitle("Polygon Merging - 外轮廓连接")
+        self.setMinimumWidth(480)
         root = QVBoxLayout(self)
         root.addWidget(QLabel("输入多边形图层"))
         self.layer_combo = QComboBox()
@@ -45,11 +46,11 @@ class MergeDialog(QDialog):
             self.layer_combo.addItem(layer.name(), layer.id())
         root.addWidget(self.layer_combo)
 
-        root.addWidget(QLabel("合并范围"))
+        root.addWidget(QLabel("处理范围"))
         self.scope_group = QButtonGroup(self)
-        self.rb_selected = QRadioButton("仅合并选中要素")
-        self.rb_all = QRadioButton("合并整个图层")
-        self.rb_name = QRadioButton("按名称包含内容合并（每个名称组单独生成一个多边形）")
+        self.rb_selected = QRadioButton("仅处理选中要素")
+        self.rb_all = QRadioButton("处理整个图层")
+        self.rb_name = QRadioButton("按名称包含内容分组处理（每组输出一个整体）")
         self.rb_selected.setChecked(True)
         for i, rb in enumerate((self.rb_selected, self.rb_all, self.rb_name)):
             self.scope_group.addButton(rb, i)
@@ -61,7 +62,7 @@ class MergeDialog(QDialog):
         self.name_edit.setPlaceholderText("例如：KIM-HB")
         row.addWidget(self.name_edit)
         root.addLayout(row)
-        note = QLabel("名称模式优先使用 Name 字段；没有该字段时使用第一个文本字段。相同完整字段值的要素归为一组。")
+        note = QLabel("按名称模式时优先使用 Name 字段；相同完整名称值归为一组。程序会连接各分离区域，并只输出整体外轮廓（填除内部孔洞）。")
         note.setWordWrap(True)
         root.addWidget(note)
 
@@ -74,7 +75,7 @@ class MergeDialog(QDialog):
         self.progress.setRange(0, 100)
         root.addWidget(self.progress)
         buttons = QHBoxLayout()
-        self.run_btn = QPushButton("开始合并")
+        self.run_btn = QPushButton("开始处理")
         close_btn = QPushButton("关闭")
         buttons.addStretch(1)
         buttons.addWidget(self.run_btn)
@@ -126,7 +127,7 @@ class MergeDialog(QDialog):
         self.run_btn.setEnabled(False)
         self.progress.setValue(0)
         try:
-            out = QgsVectorLayer("MultiPolygon?crs=" + layer.crs().authid(), layer.name() + "_Merged", "memory")
+            out = QgsVectorLayer("MultiPolygon?crs=" + layer.crs().authid(), layer.name() + "_Outer_Outline", "memory")
             if not out.isValid():
                 raise Exception("无法创建输出图层。")
             provider = out.dataProvider()
@@ -155,6 +156,8 @@ class MergeDialog(QDialog):
                         merged, connects = merge_and_connect(geoms)
                         if not merged.isGeosValid():
                             merged = merged.makeValid()
+                        if len(polygon_parts(merged)) != 1:
+                            raise Exception("连接后仍存在多个分离区域，未输出不完整结果")
                         f = QgsFeature(out.fields())
                         f.setGeometry(merged)
                         f.setAttributes([str(group_name)[:254], len(ids), ",".join(ids)[:10000], connects])
@@ -169,7 +172,7 @@ class MergeDialog(QDialog):
                 raise Exception("没有生成任何结果。\n" + "\n".join(failures[:10]))
             QgsProject.instance().addMapLayer(out)
             self.iface.setActiveLayer(out)
-            message = "处理完成。\n输出多边形组数：" + str(out.featureCount())
+            message = "处理完成。\n输出整体外轮廓数：" + str(out.featureCount())
             if failures:
                 message += "\n失败/跳过：" + str(len(failures)) + "\n" + "\n".join(failures[:8])
             QMessageBox.information(self, "Polygon Merging", message)
@@ -180,10 +183,17 @@ class MergeDialog(QDialog):
 
 
 def polygon_parts(geom):
+    """Return each polygon component as a single-part geometry."""
     parts = []
+    if geom.isNull() or geom.isEmpty():
+        return parts
+    if QgsWkbTypes.geometryType(geom.wkbType()) != QgsWkbTypes.PolygonGeometry:
+        for subgeom in geom.asGeometryCollection():
+            parts.extend(polygon_parts(subgeom))
+        return parts
     polygons = geom.asMultiPolygon() if geom.isMultipart() else [geom.asPolygon()]
     for poly in polygons:
-        if poly:
+        if poly and poly[0]:
             part = QgsGeometry.fromPolygonXY(poly)
             if not part.isNull() and not part.isEmpty():
                 parts.append(part)
@@ -200,6 +210,19 @@ def exterior_vertices(poly_geom):
     return ring
 
 
+def exterior_edge_lengths(poly_geom):
+    vertices = exterior_vertices(poly_geom)
+    if len(vertices) < 2:
+        return []
+    lengths = []
+    for i, p in enumerate(vertices):
+        q = vertices[(i + 1) % len(vertices)]
+        d = math.hypot(p.x() - q.x(), p.y() - q.y())
+        if d > 0:
+            lengths.append(d)
+    return lengths
+
+
 def closest_vertex_pair(a, b):
     av, bv = exterior_vertices(a), exterior_vertices(b)
     if not av or not bv:
@@ -214,39 +237,95 @@ def closest_vertex_pair(a, b):
     return best[0], best[1], math.sqrt(best_d2)
 
 
-def auto_tolerance(geom):
+def connector_radius(geom, a, b, gap):
+    """Adaptive half-width: visible relative to local edges and dataset extent."""
     rect = geom.boundingBox()
-    scale = max(rect.width(), rect.height(), 1.0)
-    return max(scale * 1e-9, 1e-10)
+    scale = max(rect.width(), rect.height())
+    if scale <= 0:
+        scale = 1.0
+    edges = exterior_edge_lengths(a) + exterior_edge_lengths(b)
+    local_edge = statistics.median(edges) if edges else scale * 0.01
+    # Buffer radius, not diameter. The corridor is deliberately visible,
+    # but is kept proportional to the local polygon scale.
+    radius = max(scale * 0.001, local_edge * 0.06, gap * 0.04)
+    # Prevent a very wide bridge when two components are far apart.
+    if gap > 0:
+        radius = min(radius, gap * 0.20)
+    return max(radius, scale * 1e-10, 1e-12)
+
+
+def fill_interior_holes(geom):
+    """Rebuild polygons from exterior rings only; discard all interior rings."""
+    filled = []
+    for part in polygon_parts(geom):
+        poly = part.asPolygon() if not part.isMultipart() else (part.asMultiPolygon()[0])
+        if poly and poly[0]:
+            filled.append(QgsGeometry.fromPolygonXY([poly[0]]))
+    if not filled:
+        raise Exception("无法提取最终外轮廓")
+    result = QgsGeometry.unaryUnion(filled)
+    if result.isNull() or result.isEmpty():
+        raise Exception("生成外轮廓失败")
+    if not result.isGeosValid():
+        result = result.makeValid()
+    return result
 
 
 def merge_and_connect(geometries):
+    # First dissolve all overlaps/touching boundaries into polygon components.
     merged = QgsGeometry.unaryUnion(geometries)
     if merged.isNull() or merged.isEmpty():
         raise Exception("几何融合失败")
     if not merged.isGeosValid():
         merged = merged.makeValid()
+
     connects = 0
     for _ in range(1000):
         parts = polygon_parts(merged)
         if len(parts) <= 1:
-            return merged, connects
-        best, best_dist = None, float("inf")
+            return fill_interior_holes(merged), connects
+
+        best = None
+        best_dist = float("inf")
         for i in range(len(parts)):
             for j in range(i + 1, len(parts)):
                 p, q, dist = closest_vertex_pair(parts[i], parts[j])
                 if dist < best_dist:
                     best, best_dist = (p, q), dist
+
         if best is None:
-            raise Exception("未能找到不相连区域之间的最近顶点")
+            raise Exception("未能找到不相连区域之间的最近外环顶点")
         p, q = best
-        tol = auto_tolerance(merged)
-        line = QgsGeometry.fromPolylineXY([p, q])
-        bridge = QgsGeometry.fromPointXY(p).buffer(tol, 8) if line.length() <= tol else line.buffer(tol, 8)
+        radius = connector_radius(merged, parts_for_pair(parts, p, q)[0],
+                                  parts_for_pair(parts, p, q)[1], best_dist)
+        if best_dist <= 1e-12:
+            # They are effectively touching; a tiny local buffer resolves precision gaps.
+            radius = max(radius, max(merged.boundingBox().width(),
+                                     merged.boundingBox().height(), 1.0) * 1e-7)
+
+        connector_line = QgsGeometry.fromPolylineXY([p, q])
+        bridge = connector_line.buffer(radius, 12)
         merged = QgsGeometry.unaryUnion([merged, bridge])
         if merged.isNull() or merged.isEmpty():
-            raise Exception("连接后融合失败")
+            raise Exception("连接最近顶点后融合失败")
         if not merged.isGeosValid():
             merged = merged.makeValid()
         connects += 1
+
     raise Exception("连接迭代超过安全上限，已停止处理")
+
+
+def parts_for_pair(parts, p, q):
+    """Locate the two components owning the selected nearest vertices."""
+    owner_p = owner_q = None
+    for part in parts:
+        verts = exterior_vertices(part)
+        if owner_p is None and any(v == p for v in verts):
+            owner_p = part
+        if owner_q is None and any(v == q for v in verts):
+            owner_q = part
+        if owner_p is not None and owner_q is not None:
+            break
+    if owner_p is None or owner_q is None:
+        raise Exception("无法定位最近顶点所属区域")
+    return owner_p, owner_q
