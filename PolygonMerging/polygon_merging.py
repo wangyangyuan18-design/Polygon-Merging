@@ -3,6 +3,7 @@ from qgis.PyQt.QtWidgets import QAction, QDialog, QVBoxLayout, QHBoxLayout, QLab
 from qgis.core import QgsProject, QgsWkbTypes, QgsVectorLayer, QgsFeature, QgsField, QgsGeometry, QgsPointXY, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFillSymbol, QgsSingleSymbolRenderer
 from qgis.PyQt.QtCore import QVariant
 import math
+import re
 
 
 class PolygonMergingPlugin:
@@ -100,9 +101,13 @@ class MergeDialog(QDialog):
         elif mode == 1:
             groups = [("All", list(layer.getFeatures()))]
         else:
-            needle = self.name_edit.text().strip()
-            if not needle:
-                QMessageBox.warning(self, "提示", "请输入名称包含内容。")
+            # 支持逗号、分号或换行输入多个分组关键字；每个关键字对应一个独立输出整体。
+            raw_names = self.name_edit.text().strip()
+            group_names = list(dict.fromkeys(
+                item.strip() for item in re.split(r"[,，;；\\r\\n]+", raw_names) if item.strip()
+            ))
+            if not group_names:
+                QMessageBox.warning(self, "提示", "请输入一个或多个名称关键字，多个名称请用逗号、分号或换行分隔。")
                 return
             fields = layer.fields()
             names = [f.name() for f in fields]
@@ -113,15 +118,23 @@ class MergeDialog(QDialog):
                 QMessageBox.warning(self, "提示", "没有可用于名称匹配的文本字段。")
                 return
             idx = fields.indexFromName(field_name)
-            buckets = {}
-            for feat in layer.getFeatures():
-                val = feat.attribute(idx)
-                if val is not None and needle.casefold() in str(val).casefold():
-                    buckets.setdefault(str(val), []).append(feat)
-            if not buckets:
-                QMessageBox.information(self, "结果", "没有找到名称包含该内容的要素。")
+            # 关键修正：分组键使用用户输入的关键字，而不是每个多边形自己的完整 Name 值。
+            all_features = list(layer.getFeatures())
+            groups = []
+            missing = []
+            for group_name in group_names:
+                matched = [
+                    feat for feat in all_features
+                    if feat.attribute(idx) is not None
+                    and group_name.casefold() in str(feat.attribute(idx)).casefold()
+                ]
+                if matched:
+                    groups.append((group_name, matched))
+                else:
+                    missing.append(group_name)
+            if not groups:
+                QMessageBox.information(self, "结果", "输入的所有名称都没有匹配到任何要素。")
                 return
-            groups = sorted(buckets.items(), key=lambda x: x[0].casefold())
 
         self.run_btn.setEnabled(False)
         self.progress.setValue(0)
