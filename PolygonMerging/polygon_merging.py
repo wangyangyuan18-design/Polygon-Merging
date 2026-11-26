@@ -59,7 +59,7 @@ class MergeDialog(QDialog):
         row = QHBoxLayout()
         row.addWidget(QLabel("名称包含："))
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("例如：KIM-HB")
+        self.name_edit.setPlaceholderText("例如：KYA-HB01,KYA-HB02,… 或每行一个名称")
         row.addWidget(self.name_edit)
         root.addLayout(row)
         note = QLabel("输出为橙色填充多边形。分离区域之间连接最近的两个外环顶点，并生成总宽度5米的连接带（两侧各2.5米），再与原多边形融合。清除内部共享边界和内部孔洞。")
@@ -104,7 +104,7 @@ class MergeDialog(QDialog):
             # 支持逗号、分号或换行输入多个分组关键字；每个关键字对应一个独立输出整体。
             raw_names = self.name_edit.text().strip()
             group_names = list(dict.fromkeys(
-                item.strip() for item in re.split(r"[,，;；\\r\\n]+", raw_names) if item.strip()
+                item.strip() for item in re.split(r"[,，;；\r\n]+", raw_names) if item.strip()
             ))
             if not group_names:
                 QMessageBox.warning(self, "提示", "请输入一个或多个名称关键字，多个名称请用逗号、分号或换行分隔。")
