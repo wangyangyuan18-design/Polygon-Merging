@@ -236,7 +236,8 @@ def metric_transform_for_layer(layer):
     center = QgsPointXY((extent.xMinimum() + extent.xMaximum()) / 2.0,
                         (extent.yMinimum() + extent.yMaximum()) / 2.0)
     try:
-        center.transform(to_wgs84)
+        # QgsPointXY is immutable in QGIS 3.40; use the transform's return value.
+        center = to_wgs84.transform(center)
     except Exception as exc:
         raise Exception("无法计算图层所在位置的UTM投影：" + str(exc))
     zone = max(1, min(60, int((center.x() + 180.0) / 6.0) + 1))
